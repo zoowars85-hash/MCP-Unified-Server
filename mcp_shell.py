@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MCP Shell v2.0 – безопасное выполнение команд PowerShell/CMD
-Теперь без белого списка: можно выполнять любые команды.
-Опасные действия помечаются предупреждением и требуют явного подтверждения.
+MCP Shell v2.2 – dry_run по умолчанию False, confirm_dangerous отключает dry_run
 """
 import os
 import sys
@@ -21,47 +19,31 @@ from mcp_shared import (
 DEFAULT_TIMEOUT = int(os.environ.get("MCP_SHELL_TIMEOUT", "30"))
 MAX_OUTPUT_CHARS = int(os.environ.get("MCP_SHELL_MAX_OUTPUT", "10000"))
 
-# Паттерны опасных команд (только для предупреждения, не блокировки)
+# Паттерны опасных команд (только для предупреждения)
 DANGEROUS_PATTERNS = [
-    # Удаление
     (r'Remove-Item', "Удаление файлов/папок (Remove-Item)"),
     (r'rm\s+-rf', "Удаление файлов/папок (rm -rf)"),
     (r'del\s+/[fsq]', "Удаление файлов (del)"),
     (r'format\s+[a-z]:', "Форматирование диска"),
-    # Завершение процессов
     (r'Stop-Process\s+-Force', "Принудительное завершение процессов"),
     (r'kill\s+-9', "Принудительное завершение процессов (kill -9)"),
-    # Изменение политик
     (r'Set-ExecutionPolicy', "Изменение политики выполнения PowerShell"),
-    # Повышение привилегий
     (r'Start-Process\s+-Verb\s+RunAs', "Запуск от имени администратора"),
-    # Запись в системные папки
     (r'Write-.*\s+.*\\Windows', "Запись в папку Windows"),
-    # Реестр
     (r'Reg\s+(?:add|delete)', "Изменение реестра"),
-    # Управление пользователями
     (r'net\s+user\s+/add', "Добавление пользователя"),
     (r'net\s+localgroup', "Изменение групп"),
-    # Планировщик задач
     (r'schtasks\s+/create', "Создание задачи в планировщике"),
-    # Системные утилиты
     (r'bcdedit', "Изменение конфигурации загрузки"),
     (r'vssadmin\s+delete', "Удаление теневых копий"),
-    # Скачивание и выполнение
     (r'wget\s+.*\|', "Скачивание и выполнение через конвейер"),
     (r'curl\s+.*\|', "Скачивание и выполнение через конвейер"),
     (r'Invoke-Expression', "Динамическое выполнение кода (Invoke-Expression)"),
-    # Отключение защиты
     (r'Set-MpPreference', "Изменение настроек Defender"),
     (r'Disable-.*Defender', "Отключение защиты"),
 ]
 
 def _is_dangerous_command(command: str) -> Tuple[bool, str]:
-    """
-    Проверяет команду на наличие опасных паттернов.
-    Возвращает (опасно, причина).
-    """
-    cmd_lower = command.lower()
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return True, description
@@ -77,15 +59,20 @@ def run_shell(command: str, shell: str = "powershell", timeout: int = DEFAULT_TI
         command: Команда для выполнения
         shell: "powershell" или "cmd"
         timeout: Таймаут в секундах
-        dry_run: Если True, только проверяет команду, не выполняя
-        confirm_dangerous: Если True и команда опасна, выполняет её (требуется явное согласие пользователя)
+        dry_run: Если True, только проверяет команду, не выполняя (по умолч. False)
+        confirm_dangerous: Если True и команда опасна, выполняет её (также принудительно отключает dry_run)
         dialog_id: ID диалога для логирования
     """
     d_id = dialog_id or dialog_ctx.get()
     
-    # Проверка на опасность
+    # confirm_dangerous переопределяет dry_run
+    if confirm_dangerous:
+        dry_run = False
+        _log(f"[run_shell] confirm_dangerous=True, forced dry_run=False")
+    
     dangerous, reason = _is_dangerous_command(command)
     
+    # Сухой запуск
     if dry_run:
         result = {
             "status": "dry_run",
@@ -98,7 +85,7 @@ def run_shell(command: str, shell: str = "powershell", timeout: int = DEFAULT_TI
             result["requires_confirmation"] = True
         return result
     
-    # Если команда опасна и подтверждение не получено
+    # Опасная команда без подтверждения
     if dangerous and not confirm_dangerous:
         return {
             "status": "blocked",
@@ -169,17 +156,17 @@ def run_shell(command: str, shell: str = "powershell", timeout: int = DEFAULT_TI
 
 def register_shell_tool(server: BaseMCPServer):
     server.register_tool("run_shell", {
-        "description": "Execute any PowerShell/CMD command. Dangerous commands require confirm_dangerous=True.",
+        "description": "Execute any PowerShell/CMD command. Dangerous commands require confirm_dangerous=True. By default dry_run=False (real execution). Use dry_run=True for preview.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Command to execute"},
                 "shell": {"type": "string", "enum": ["powershell", "cmd"], "default": "powershell"},
                 "timeout": {"type": "integer", "default": DEFAULT_TIMEOUT},
-                "dry_run": {"type": "boolean", "default": True,
-                           "description": "If True, only check command safety without executing"},
+                "dry_run": {"type": "boolean", "default": False,
+                           "description": "If True, only check command safety without executing (preview mode)."},
                 "confirm_dangerous": {"type": "boolean", "default": False,
-                                      "description": "Set to True to allow execution of dangerous commands"},
+                                      "description": "Set to True to allow execution of dangerous commands. Also forces dry_run=False."},
                 "dialog_id": {"type": "string"}
             },
             "required": ["command"]
@@ -188,10 +175,10 @@ def register_shell_tool(server: BaseMCPServer):
         kw["command"],
         kw.get("shell", "powershell"),
         kw.get("timeout", DEFAULT_TIMEOUT),
-        kw.get("dry_run", True),
+        kw.get("dry_run", False),
         kw.get("confirm_dangerous", False),
         kw.get("dialog_id")
     ))
 
 if __name__ == "__main__":
-    _log("Shell module v2.0 loaded. Full command execution with dangerous warnings.")
+    _log("Shell module v2.2 loaded. dry_run defaults to False. confirm_dangerous disables dry_run.")
