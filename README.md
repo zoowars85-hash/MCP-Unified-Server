@@ -157,11 +157,15 @@ Dependency installation (needs an alternative to setup.bat)
 
 # Пользование, запуск, интеграция и зависимости / Usage, Launch, Integration & Dependencies
 
+> **Примечание:** Проект предполагает установку в папку `C:\Tools`. Все примеры путей используют эту директорию.
+
+---
+
 ## Русский
 
 ### 📦 Зависимости
 
-#### Python-пакеты (устанавливаются автоматически через `setup.bat`)
+#### Python-пакеты (устанавливаются автоматически через `setup.bat` из `C:\Tools`)
 
 | Пакет | Назначение |
 |-------|-------------|
@@ -202,18 +206,21 @@ Dependency installation (needs an alternative to setup.bat)
 | **LibreOffice** | Конвертация Office → PDF | `winget install TheDocumentFoundation.LibreOffice` |
 | **Playwright браузеры** | Рендеринг JS | После установки playwright: `playwright install chromium` |
 
-> **Примечание:** `setup.bat` автоматически устанавливает **только Python-пакеты** и пытается установить pandoc + wkhtmltopdf. Остальные утилиты нужно установить вручную или через winget.
+> **Примечание:** `setup.bat` из `C:\Tools` автоматически устанавливает **только Python-пакеты** и пытается установить pandoc + wkhtmltopdf. Остальные утилиты нужно установить вручную или через winget.
 
 ### 🚀 Запуск и интеграция
 
 #### 1. Установка
 
 ```bash
-# Клонируйте репозиторий
-git clone https://github.com/yourname/mcp-unified-server.git
-cd mcp-unified-server
+# Перейдите в папку проекта
+cd C:\Tools
 
-# Запустите установщик (Windows)
+# Клонируйте репозиторий (если ещё не сделали)
+git clone https://github.com/yourname/mcp-unified-server.git
+cd C:\Tools\mcp-unified-server
+
+# Запустите установщик
 setup.bat
 
 # Меню установщика:
@@ -222,30 +229,34 @@ setup.bat
 # 3 – Установить зависимости из python_deps (офлайн)
 # 8 – Запустить сервер
 2. Настройка переменных окружения
-Создайте файл .env или установите переменные в системе:
+Создайте файл .env в C:\Tools\mcp-unified-server или установите переменные в системе:
 
 ini
-# Обязательные
-MCP_ALLOWED_PATHS=C:\;D:\Data            # Какие диски/папки доступны
-LLM_ENDPOINT=http://localhost:1234/v1/chat/completions   # Локальная LLM
+# Пути (все файлы в C:\Tools)
+MCP_ALLOWED_PATHS=C:\Tools;C:\
+MCP_MEMORY_PATH=C:\Tools\mcp_memory.db
+MCP_TASK_DB=C:\Tools\mcp_tasks.db
+MCP_SCHEDULER_DB=C:\Tools\mcp_scheduler.db
+MCP_RAG_DB_PATH=C:\Tools\mcp_rag_db
+MCP_TRASH_PATH=C:\Tools\.mcp_trash
 
-# Рекомендуемые
-MCP_MEMORY_PATH=C:\Tools\mcp_memory.db   # База памяти диалогов
-MCP_AUTO_MEMORY=true                     # Автоочистка и снимки
-MCP_VERBOSE_DEFAULT=true                 # Показывать прогресс
-MCP_SHELL_TIMEOUT=30                     # Таймаут shell-команд
-MCP_RAG_DB_PATH=./mcp_rag_db             # Папка для RAG индекса
+# Локальная LLM (например, LM Studio на порту 1234)
+LLM_ENDPOINT=http://localhost:1234/v1/chat/completions
 
-# Опциональные (безопасность)
-MCP_ALLOWED_UNC_PATHS=\\server\share     # Разрешённые сетевые шары
-MCP_TRASH_PATH=C:\.mcp_trash             # Папка корзины
-MCP_TRASH_MAX_AGE=30                     # Дней хранить в корзине
+# Автоматизация
+MCP_AUTO_MEMORY=true
+MCP_VERBOSE_DEFAULT=true
+MCP_SHELL_TIMEOUT=30
+
+# Безопасность (опционально)
+MCP_ALLOWED_UNC_PATHS=\\server\share
+MCP_TRASH_MAX_AGE=30
 3. Интеграция с LM Studio
 Откройте LM Studio → Настройки → MCP Servers
 
 Нажмите "Edit config file"
 
-Вставьте конфигурацию:
+Вставьте конфигурацию (все пути ведут в C:\Tools):
 
 json
 {
@@ -255,7 +266,8 @@ json
       "args": ["C:\\Tools\\mcp-unified-server\\mcp_fs_server.py"],
       "env": {
         "PYTHONIOENCODING": "utf-8",
-        "MCP_ALLOWED_PATHS": "C:\\;D:\\",
+        "MCP_ALLOWED_PATHS": "C:\\Tools;C:\\",
+        "MCP_MEMORY_PATH": "C:\\Tools\\mcp_memory.db",
         "LLM_ENDPOINT": "http://localhost:1234/v1/chat/completions",
         "MCP_AUTO_MEMORY": "true"
       }
@@ -274,7 +286,8 @@ json
       "command": "C:\\Tools\\mcp-unified-server\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Tools\\mcp-unified-server\\mcp_fs_server.py"],
       "env": {
-        "MCP_ALLOWED_PATHS": "C:\\;D:\\",
+        "MCP_ALLOWED_PATHS": "C:\\Tools;C:\\",
+        "MCP_MEMORY_PATH": "C:\\Tools\\mcp_memory.db",
         "LLM_ENDPOINT": "http://localhost:1234/v1/chat/completions"
       }
     }
@@ -282,6 +295,7 @@ json
 }
 5. Ручной запуск (без MCP-клиента, для отладки)
 bash
+cd C:\Tools\mcp-unified-server
 .venv\Scripts\python mcp_fs_server.py
 Сервер будет слушать STDIN и выводить ответы в STDOUT. Для теста можно отправить JSON-RPC запрос:
 
@@ -295,9 +309,24 @@ text
 или
 
 text
-найди файлы *.txt в папке C:\Temp
+найди файлы *.py в папке C:\Tools
 Сервер должен ответить результатом.
 
+🗂️ Структура файлов в C:\Tools после установки
+text
+C:\Tools\
+├── mcp-unified-server\          # Корень проекта
+│   ├── .venv\                   # Виртуальное окружение Python
+│   ├── mcp_fs_server.py         # Главный сервер
+│   ├── mcp_shared.py            # Общее ядро
+│   ├── mcp_*.py                 # Все модули инструментов
+│   ├── setup.bat                # Установщик
+│   ├── python_deps\             # Offline-пакеты (опционально)
+│   └── mcp_rag_db\              # RAG векторная база (создаётся при первом индексе)
+├── mcp_memory.db                # База памяти диалогов
+├── mcp_tasks.db                 # База асинхронных задач
+├── mcp_scheduler.db             # База планировщика
+└── .mcp_trash\                  # Корзина (скрытая папка)
 🐧 Запуск на Linux / macOS (экспериментально)
 bash
 # Создание виртуального окружения
@@ -312,8 +341,10 @@ pip install -r requirements.txt   # или pip install watchdog psutil requests 
 Внимание: setup.bat не работает на Linux/macOS. Скрипт автоматической установки нуждается в портировании – помощь сообщества приветствуется!
 
 English
+Note: The project is intended to be installed in C:\Tools. All example paths use this directory.
+
 📦 Dependencies
-Python packages (automatically installed via setup.bat)
+Python packages (automatically installed via setup.bat from C:\Tools)
 Package	Purpose
 watchdog	File system monitoring
 psutil	System monitoring (CPU, memory, disks)
@@ -348,16 +379,19 @@ rclone	Cloud sync	winget install Rclone.Rclone
 Tesseract	OCR (text from images)	winget install UB-Mannheim.TesseractOCR
 LibreOffice	Office → PDF conversion	winget install TheDocumentFoundation.LibreOffice
 Playwright browsers	JS rendering	After playwright install: playwright install chromium
-Note: setup.bat automatically installs Python packages only and tries to install pandoc + wkhtmltopdf. Other tools need manual installation or via winget.
+Note: setup.bat from C:\Tools automatically installs Python packages only and tries to install pandoc + wkhtmltopdf. Other tools need manual installation or via winget.
 
 🚀 Launch and Integration
 1. Installation
 bash
-# Clone the repository
-git clone https://github.com/yourname/mcp-unified-server.git
-cd mcp-unified-server
+# Navigate to project folder
+cd C:\Tools
 
-# Run the installer (Windows)
+# Clone the repository (if not already done)
+git clone https://github.com/yourname/mcp-unified-server.git
+cd C:\Tools\mcp-unified-server
+
+# Run the installer
 setup.bat
 
 # Installer menu:
@@ -366,30 +400,34 @@ setup.bat
 # 3 – Install dependencies from python_deps (offline)
 # 8 – Start the server
 2. Environment variables configuration
-Create a .env file or set system variables:
+Create a .env file in C:\Tools\mcp-unified-server or set system variables:
 
 ini
-# Required
-MCP_ALLOWED_PATHS=C:\;D:\Data            # Allowed drives/folders
-LLM_ENDPOINT=http://localhost:1234/v1/chat/completions   # Local LLM
+# Paths (all files in C:\Tools)
+MCP_ALLOWED_PATHS=C:\Tools;C:\
+MCP_MEMORY_PATH=C:\Tools\mcp_memory.db
+MCP_TASK_DB=C:\Tools\mcp_tasks.db
+MCP_SCHEDULER_DB=C:\Tools\mcp_scheduler.db
+MCP_RAG_DB_PATH=C:\Tools\mcp_rag_db
+MCP_TRASH_PATH=C:\Tools\.mcp_trash
 
-# Recommended
-MCP_MEMORY_PATH=C:\Tools\mcp_memory.db   # Dialog memory database
-MCP_AUTO_MEMORY=true                     # Auto cleanup & snapshots
-MCP_VERBOSE_DEFAULT=true                 # Show progress
-MCP_SHELL_TIMEOUT=30                     # Shell command timeout
-MCP_RAG_DB_PATH=./mcp_rag_db             # RAG index folder
+# Local LLM (e.g., LM Studio on port 1234)
+LLM_ENDPOINT=http://localhost:1234/v1/chat/completions
 
-# Optional (security)
-MCP_ALLOWED_UNC_PATHS=\\server\share     # Allowed network shares
-MCP_TRASH_PATH=C:\.mcp_trash             # Trash folder
-MCP_TRASH_MAX_AGE=30                     # Days to keep in trash
+# Automation
+MCP_AUTO_MEMORY=true
+MCP_VERBOSE_DEFAULT=true
+MCP_SHELL_TIMEOUT=30
+
+# Security (optional)
+MCP_ALLOWED_UNC_PATHS=\\server\share
+MCP_TRASH_MAX_AGE=30
 3. Integration with LM Studio
 Open LM Studio → Settings → MCP Servers
 
 Click "Edit config file"
 
-Paste the configuration:
+Paste the configuration (all paths point to C:\Tools):
 
 json
 {
@@ -399,7 +437,8 @@ json
       "args": ["C:\\Tools\\mcp-unified-server\\mcp_fs_server.py"],
       "env": {
         "PYTHONIOENCODING": "utf-8",
-        "MCP_ALLOWED_PATHS": "C:\\;D:\\",
+        "MCP_ALLOWED_PATHS": "C:\\Tools;C:\\",
+        "MCP_MEMORY_PATH": "C:\\Tools\\mcp_memory.db",
         "LLM_ENDPOINT": "http://localhost:1234/v1/chat/completions",
         "MCP_AUTO_MEMORY": "true"
       }
@@ -418,7 +457,8 @@ json
       "command": "C:\\Tools\\mcp-unified-server\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Tools\\mcp-unified-server\\mcp_fs_server.py"],
       "env": {
-        "MCP_ALLOWED_PATHS": "C:\\;D:\\",
+        "MCP_ALLOWED_PATHS": "C:\\Tools;C:\\",
+        "MCP_MEMORY_PATH": "C:\\Tools\\mcp_memory.db",
         "LLM_ENDPOINT": "http://localhost:1234/v1/chat/completions"
       }
     }
@@ -426,6 +466,7 @@ json
 }
 5. Manual launch (without MCP client, for debugging)
 bash
+cd C:\Tools\mcp-unified-server
 .venv\Scripts\python mcp_fs_server.py
 The server listens on STDIN and outputs responses to STDOUT. For testing, send a JSON-RPC request:
 
@@ -439,9 +480,24 @@ text
 or
 
 text
-search for *.txt files in C:\Temp
+search for *.py files in C:\Tools
 The server should respond with results.
 
+🗂️ File structure in C:\Tools after installation
+text
+C:\Tools\
+├── mcp-unified-server\          # Project root
+│   ├── .venv\                   # Python virtual environment
+│   ├── mcp_fs_server.py         # Main server
+│   ├── mcp_shared.py            # Core shared library
+│   ├── mcp_*.py                 # All tool modules
+│   ├── setup.bat                # Installer
+│   ├── python_deps\             # Offline packages (optional)
+│   └── mcp_rag_db\              # RAG vector database (created on first index)
+├── mcp_memory.db                # Dialog memory database
+├── mcp_tasks.db                 # Async tasks database
+├── mcp_scheduler.db             # Scheduler database
+└── .mcp_trash\                  # Trash folder (hidden)
 🐧 Running on Linux / macOS (experimental)
 bash
 # Create virtual environment
