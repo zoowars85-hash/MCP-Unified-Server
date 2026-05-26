@@ -1,3 +1,38 @@
+Tested only with LM Studio – I developed and tested this server exclusively with LM Studio.
+It should work with any MCP client, but I need your help testing on other platforms.
+
+LLMs can make mistakes – always review and confirm destructive operations. Use dry_run=True and do not trust the AI blindly.
+
+Community help needed
+Linux / macOS testing
+
+Integration with other MCP clients (Claude Desktop, Continue, Zed)
+
+Security, documentation, tests, translations
+
+# For Linux/macOS, adaptation is needed (help wanted!)
+
+MCP Unified Server – Complete Toolset for LLM Agents
+Полный набор инструментов для LLM‑агентов
+
+Author / Автор: Claus
+
+Важные замечания
+
+1. Проверено только с LM Studio – я разрабатывал и тестировал сервер только с LM Studio.  
+   Он должен работать с любым MCP‑клиентом, но нужна ваша помощь в тестировании на других платформах.
+
+2. Нейросети могут ошибаться – всегда проверяйте и подтверждайте опасные операции. Используйте `dry_run=True` и не доверяйте ИИ слепо.
+
+Нужна помощь сообщества
+
+- Тестирование на Linux / macOS
+- Интеграция с другими MCP‑клиентами (Claude Desktop, Continue, Zed)
+- Безопасность, документация, тесты, переводы
+
+# Для Linux/macOS нужна адаптация (помощь приветствуется!)
+
+
 Архитектура проекта / Project Architecture
 markdown
 ## Архитектура проекта / Project Architecture
