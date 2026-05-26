@@ -1,7 +1,7 @@
 #!C:\Tools\.venv\Scripts\python.exe
 """
-MCP Memory Engine v4.5 – Добавлена поддержка долгосрочного архива
-Совместим с mcp_shared v5.2 (таблицы entries/mem_snapshots/archived_entries)
+MCP Memory Engine v4.6 – Добавлена пагинация, поиск по диалогам, краткое содержание.
+Поддержка параметра dialog_id в mem_thread + инструменты для работы с большим списком диалогов.
 """
 import os
 import sys
@@ -14,6 +14,14 @@ from typing import List, Dict, Optional, Union
 from mcp_shared import (
     _log, BaseMCPServer, conversation_memory, dialog_ctx, MEMORY_DB_PATH
 )
+
+# Пытаемся импортировать dialog_manager для получения имён диалогов (опционально)
+try:
+    from dialog_manager import db as dialog_db
+    HAS_DIALOG_MANAGER = True
+except ImportError:
+    HAS_DIALOG_MANAGER = False
+    _log("[MemoryEngine] dialog_manager not available, dialog names will be missing")
 
 class MemoryEngine:
     def __init__(self, db_path: str = MEMORY_DB_PATH):
@@ -243,6 +251,209 @@ class MemoryEngine:
         finally:
             conn.close()
 
+    # --- НОВЫЕ МЕТОДЫ ДЛЯ ПАГИНАЦИИ И ПОИСКА ---
+    def get_dialog_name(self, dialog_id: str) -> str:
+        """Получить название диалога из dialog_manager, если доступно."""
+        if HAS_DIALOG_MANAGER:
+            try:
+                name = dialog_db.get_name(dialog_id)
+                if name:
+                    return name
+            except Exception:
+                pass
+        return ""
+
+    def list_all_dialogs_with_summary(self, offset: int = 0, limit: int = 20, search: str = None) -> Dict:
+        """
+        Возвращает список диалогов (активных + архивных) с кратким содержанием.
+        Поддерживает пагинацию (offset, limit) и поиск по search (в context, op, или имени диалога).
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            # 1. Получаем все уникальные dialog_id из entries и archived_entries
+            active_dialogs = set(r[0] for r in conn.execute("SELECT DISTINCT dialog FROM entries").fetchall())
+            archived_dialogs = set(r[0] for r in conn.execute("SELECT DISTINCT dialog FROM archived_entries").fetchall())
+            all_dialog_ids = sorted(active_dialogs.union(archived_dialogs), key=lambda x: x.lower())
+
+            # 2. Если есть поисковый запрос – фильтруем
+            if search:
+                search_lower = search.lower()
+                filtered_ids = []
+                for d_id in all_dialog_ids:
+                    # Проверяем имя диалога
+                    name = self.get_dialog_name(d_id).lower()
+                    if search_lower in name:
+                        filtered_ids.append(d_id)
+                        continue
+                    # Проверяем наличие поисковой фразы в контексте записей (активных или архивных)
+                    # Активные
+                    rows = conn.execute(
+                        "SELECT context FROM entries WHERE dialog = ? AND context LIKE ? LIMIT 1",
+                        (d_id, f"%{search_lower}%")
+                    ).fetchall()
+                    if rows:
+                        filtered_ids.append(d_id)
+                        continue
+                    # Архив
+                    rows = conn.execute(
+                        "SELECT context FROM archived_entries WHERE dialog = ? AND context LIKE ? LIMIT 1",
+                        (d_id, f"%{search_lower}%")
+                    ).fetchall()
+                    if rows:
+                        filtered_ids.append(d_id)
+                        continue
+                all_dialog_ids = filtered_ids
+
+            total = len(all_dialog_ids)
+            # Пагинация
+            paginated_ids = all_dialog_ids[offset:offset+limit]
+            results = []
+
+            for d_id in paginated_ids:
+                # Получаем название диалога
+                name = self.get_dialog_name(d_id)
+                # Считаем количество записей в активной таблице
+                active_count = conn.execute("SELECT COUNT(*) FROM entries WHERE dialog = ?", (d_id,)).fetchone()[0]
+                archived_count = conn.execute("SELECT COUNT(*) FROM archived_entries WHERE dialog = ?", (d_id,)).fetchone()[0]
+                total_entries = active_count + archived_count
+
+                # Формируем краткое содержание (первые 2-3 записи)
+                summary_parts = []
+                # Берем последние 2 активные записи
+                active_rows = conn.execute(
+                    "SELECT op, context, ts FROM entries WHERE dialog = ? ORDER BY ts DESC LIMIT 2",
+                    (d_id,)
+                ).fetchall()
+                for row in active_rows:
+                    op = row["op"]
+                    ctx = (row["context"] or "")[:80]
+                    summary_parts.append(f"{op}: {ctx}")
+                # Если активных нет – берем из архива (последние 2)
+                if not active_rows:
+                    arch_rows = conn.execute(
+                        "SELECT op, context, ts FROM archived_entries WHERE dialog = ? ORDER BY ts DESC LIMIT 2",
+                        (d_id,)
+                    ).fetchall()
+                    for row in arch_rows:
+                        op = row["op"]
+                        ctx = (row["context"] or "")[:80]
+                        summary_parts.append(f"{op}: {ctx}")
+
+                summary = "; ".join(summary_parts) if summary_parts else "Нет записей"
+                # Обрезаем слишком длинный summary
+                if len(summary) > 200:
+                    summary = summary[:197] + "..."
+
+                results.append({
+                    "dialog_id": d_id,
+                    "name": name if name else None,
+                    "total_entries": total_entries,
+                    "active_entries": active_count,
+                    "archived_entries": archived_count,
+                    "summary": summary
+                })
+
+            return {
+                "status": "success",
+                "offset": offset,
+                "limit": limit,
+                "total": total,
+                "has_more": offset + limit < total,
+                "dialogs": results
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+        finally:
+            conn.close()
+
+    def search_dialogs(self, query: str, limit: int = 20, offset: int = 0,
+                       include_archived: bool = True) -> Dict:
+        """
+        Поиск по контексту сообщений и операциям в диалогах (активных и архивных).
+        Возвращает диалоги, где найдено совпадение, с краткой выдержкой.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            search_pattern = f"%{query.lower()}%"
+            dialog_scores = {}  # dialog_id -> список совпадений
+
+            # Поиск в активных записях
+            rows = conn.execute("""
+                SELECT dialog, op, context, ts
+                FROM entries
+                WHERE LOWER(context) LIKE ? OR LOWER(op) LIKE ?
+                ORDER BY ts DESC
+            """, (search_pattern, search_pattern))
+            for row in rows:
+                d_id = row["dialog"]
+                if d_id not in dialog_scores:
+                    dialog_scores[d_id] = []
+                ctx_preview = (row["context"] or "")[:150]
+                dialog_scores[d_id].append({
+                    "source": "active",
+                    "op": row["op"],
+                    "preview": ctx_preview,
+                    "ts": row["ts"]
+                })
+
+            # Поиск в архиве (если нужно)
+            if include_archived:
+                rows = conn.execute("""
+                    SELECT dialog, op, context, ts
+                    FROM archived_entries
+                    WHERE LOWER(context) LIKE ? OR LOWER(op) LIKE ?
+                    ORDER BY ts DESC
+                """, (search_pattern, search_pattern))
+                for row in rows:
+                    d_id = row["dialog"]
+                    if d_id not in dialog_scores:
+                        dialog_scores[d_id] = []
+                    ctx_preview = (row["context"] or "")[:150]
+                    dialog_scores[d_id].append({
+                        "source": "archived",
+                        "op": row["op"],
+                        "preview": ctx_preview,
+                        "ts": row["ts"]
+                    })
+
+            # Сортируем диалоги по дате последнего совпадения
+            dialogs_list = []
+            for d_id, matches in dialog_scores.items():
+                # Берём имя диалога
+                name = self.get_dialog_name(d_id)
+                # Сортируем совпадения по времени и берём первое (самое свежее)
+                matches_sorted = sorted(matches, key=lambda x: x["ts"], reverse=True)
+                latest_match = matches_sorted[0]
+                dialogs_list.append({
+                    "dialog_id": d_id,
+                    "name": name if name else None,
+                    "match_count": len(matches),
+                    "latest_match_op": latest_match["op"],
+                    "latest_match_preview": latest_match["preview"],
+                    "latest_match_source": latest_match["source"]
+                })
+            # Сортируем по убыванию количества совпадений (релевантность)
+            dialogs_list.sort(key=lambda x: x["match_count"], reverse=True)
+
+            total = len(dialogs_list)
+            paginated = dialogs_list[offset:offset+limit]
+
+            return {
+                "status": "success",
+                "query": query,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": offset + limit < total,
+                "dialogs": paginated
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+        finally:
+            conn.close()
+
     def search_archive(self, dialog: str = None, op: str = None, path: str = None,
                        category: str = None, tags: List[str] = None,
                        hours: int = None, limit: int = 100) -> Dict:
@@ -260,22 +471,18 @@ class MemoryEngine:
         return {"status": "restored" if success else "not_found", "entry_id": entry_id}
 
     def restore_dialog_from_archive(self, dialog_id: str, limit: int = 50) -> Dict:
-        """Восстановить последние limit сообщений диалога из архива."""
         restored = conversation_memory.restore_dialog_from_archive(dialog_id, limit)
         return {"status": "restored", "dialog_id": dialog_id, "restored_count": restored}
 
     def purge_archive(self, older_than_days: int = 730) -> Dict:
-        """Очистить архив от записей старше указанного числа дней."""
         return conversation_memory.purge_archive(older_than_days)
 
     def optimize_database(self) -> Dict:
-        """Запустить VACUUM и очистить кеш чанков."""
         with conversation_memory._lock:
             conn = conversation_memory._get_conn()
             try:
                 conn.execute("VACUUM")
                 conn.commit()
-                # также можно оптимизировать FTS, если есть
             finally:
                 conn.close()
             if hasattr(conversation_memory.chunk_cache, 'cleanup'):
@@ -286,10 +493,8 @@ class MemoryEngine:
         return conversation_memory.archive_stats()
 
 
-# ─── ИСПРАВЛЕННАЯ ФУНКЦИЯ ────────────────────────────────────────────────
+# ─── ФУНКЦИЯ ЛОГИРОВАНИЯ ────────────────────────────────────────────────
 def log_conversation(role: str, content: str, dialog_id: Optional[str] = None) -> str:
-    """Сохранить сообщение диалога (user/assistant) в память.
-       Возвращает простую строку, чтобы избежать экранирования в JSON."""
     d_id = dialog_id or dialog_ctx.get()
     if not content or not content.strip():
         return "Error: Empty content"
@@ -307,9 +512,9 @@ def log_conversation(role: str, content: str, dialog_id: Optional[str] = None) -
 
 # ─── ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И СЕРВЕР ────────────────────────────────────────
 _engine = MemoryEngine(MEMORY_DB_PATH)
-server = BaseMCPServer("memory-engine", "4.5")
+server = BaseMCPServer("memory-engine", "4.6")
 
-# Регистрация инструментов
+# Регистрация инструментов (с исправленными сигнатурами)
 server.register_tool("mem_add", {
     "description": "Add entry to persistent memory",
     "inputSchema": {"type": "object", "properties": {
@@ -331,12 +536,18 @@ server.register_tool("mem_query", {
     }}
 }, lambda **kw: _engine.query(**kw))
 
+# ИСПРАВЛЕННЫЙ mem_thread: принимает dialog_id (а также dialog для обратной совместимости)
 server.register_tool("mem_thread", {
-    "description": "Get conversation thread",
-    "inputSchema": {"type": "object", "properties": {
-        "dialog": {"type": "string"}, "limit": {"type": "integer", "default": 100}
-    }}
-}, lambda **kw: _engine.get_thread(**kw))
+    "description": "Get conversation thread by dialog ID",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "dialog_id": {"type": "string", "description": "Dialog ID (preferred)"},
+            "dialog": {"type": "string", "description": "Dialog ID (legacy)"},
+            "limit": {"type": "integer", "default": 100}
+        }
+    }
+}, lambda **kw: _engine.get_thread(dialog=kw.get("dialog_id") or kw.get("dialog"), limit=kw.get("limit", 100)))
 
 server.register_tool("mem_snapshot", {
     "description": "Save state snapshot",
@@ -361,9 +572,46 @@ server.register_tool("mem_clear", {
 }, lambda **kw: _engine.clear_all(kw.get('dry_run', False)))
 
 server.register_tool("mem_list_dialogs", {
-    "description": "List all dialog IDs in memory with entry counts and timestamps",
+    "description": "List all dialog IDs in memory with entry counts and timestamps (basic)",
     "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 50}}}
 }, lambda **kw: _engine.list_dialogs(kw.get('limit', 50)))
+
+# НОВЫЙ ИНСТРУМЕНТ: список диалогов с кратким содержанием и пагинацией
+server.register_tool("mem_list_dialogs_summary", {
+    "description": "List dialogs with brief summary (active + archived). Supports pagination (offset/limit) and search by keyword.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "offset": {"type": "integer", "default": 0, "description": "Starting offset"},
+            "limit": {"type": "integer", "default": 20, "description": "Number of dialogs per page (max 40)"},
+            "search": {"type": "string", "description": "Optional search keyword (in context, op, or dialog name)"}
+        }
+    }
+}, lambda **kw: _engine.list_all_dialogs_with_summary(
+    offset=kw.get("offset", 0),
+    limit=min(kw.get("limit", 20), 40),  # максимум 40 за раз
+    search=kw.get("search")
+))
+
+# НОВЫЙ ИНСТРУМЕНТ: поиск по диалогам по содержанию
+server.register_tool("mem_search_dialogs", {
+    "description": "Search dialog history by keyword (context or operation). Returns dialogs with match preview.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search keyword or phrase"},
+            "limit": {"type": "integer", "default": 20},
+            "offset": {"type": "integer", "default": 0},
+            "include_archived": {"type": "boolean", "default": True}
+        },
+        "required": ["query"]
+    }
+}, lambda **kw: _engine.search_dialogs(
+    query=kw["query"],
+    limit=min(kw.get("limit", 20), 40),
+    offset=kw.get("offset", 0),
+    include_archived=kw.get("include_archived", True)
+))
 
 server.register_tool("mem_search_archive", {
     "description": "Поиск в долгосрочном архиве",
@@ -425,9 +673,9 @@ server.register_tool("mem_archive_stats", {
     "inputSchema": {"type": "object", "properties": {}}
 }, lambda **kw: _engine.archive_stats())
 
-# ─── ИСПРАВЛЕННЫЙ ИНСТРУМЕНТ ДЛЯ ЛОГИРОВАНИЯ ДИАЛОГА ─────────────────────
+# Исправленный log_conversation (уже был)
 server.register_tool("log_conversation", {
-    "description": "Сохранить сообщение диалога (user/assistant) в память. Вызывай перед каждым своим ответом и, если возможно, перед вопросом пользователя.",
+    "description": "Сохранить сообщение диалога (user/assistant) в память. Вызывай перед каждым своим ответом.",
     "inputSchema": {
         "type": "object",
         "properties": {
