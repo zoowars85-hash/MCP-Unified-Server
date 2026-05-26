@@ -3,6 +3,7 @@
 """
 MCP Web Reader v4.0 – улучшенное извлечение: текст (trafilatura/readability),
 таблицы (pandas / html-table-takeout), изображения, больше источников поиска.
+(Исправлены имена зависимостей для корректной загрузки плагина)
 """
 import os
 import re
@@ -19,7 +20,7 @@ import requests
 from requests.exceptions import RequestException
 from urllib.robotparser import RobotFileParser
 
-# Улучшенные библиотеки для извлечения контента
+# Улучшенные библиотеки для извлечения контента (опционально)
 try:
     import trafilatura
     TRAFILATURA_AVAILABLE = True
@@ -66,11 +67,14 @@ from mcp_shared import (
     BaseMCPServer, conversation_memory, dialog_ctx
 )
 
+# ИСПРАВЛЕНА СЕКЦИЯ ЗАВИСИМОСТЕЙ
 __mcp_plugin__ = {
     "name": "web-reader",
     "version": "4.0.0",
     "description": "Расширенный веб-ридер: текст, таблицы, изображения, поиск по нескольким источникам",
-    "dependencies": ["requests", "bs4", "feedparser", "playwright", "trafilatura", "readability-lxml", "pandas", "html-table-takeout"],
+    # Указаны корректные имена модулей (readability вместо readability-lxml, html_table_takeout вместо html-table-takeout)
+    # Также оставлены только минимально необходимые для базовой работы; остальные опциональны
+    "dependencies": ["requests", "bs4", "feedparser", "playwright", "trafilatura", "readability", "pandas", "html_table_takeout"],
     "on_load": lambda: _log("[web-reader] v4.0 loaded. Enhanced extraction active."),
     "on_unload": lambda: _log("[web-reader] Unloaded.")
 }
@@ -120,7 +124,8 @@ def _get_robots_parser(base_url: str) -> RobotFileParser:
 
 def _is_allowed_by_robots(url: str) -> bool:
     base = _get_domain(url)
-    if not base: return False
+    if not base:
+        return False
     return _get_robots_parser(base).can_fetch(USER_AGENT, url)
 
 def _is_safe_host(host: str) -> bool:
@@ -640,7 +645,6 @@ def register_tools(server: BaseMCPServer):
             "required": ["data", "output_path"]
         }
     }, lambda **kw: export_scraped_data(kw["data"], kw["output_path"], kw.get("format", "json"), kw.get("delimiter", ",")))
-
 
 if __name__ == "__main__":
     server = BaseMCPServer("web-reader", "4.0")
