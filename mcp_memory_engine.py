@@ -1,7 +1,7 @@
 #!C:\Tools\.venv\Scripts\python.exe
 """
-MCP Memory Engine v4.6 – Добавлена пагинация, поиск по диалогам, краткое содержание.
-Поддержка параметра dialog_id в mem_thread + инструменты для работы с большим списком диалогов.
+MCP Memory Engine v4.7 – пагинация, поиск по диалогам, краткое содержание.
+Поддержка dialog_id в mem_thread + инструменты для работы с большим списком диалогов.
 """
 import os
 import sys
@@ -512,7 +512,7 @@ def log_conversation(role: str, content: str, dialog_id: Optional[str] = None) -
 
 # ─── ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И СЕРВЕР ────────────────────────────────────────
 _engine = MemoryEngine(MEMORY_DB_PATH)
-server = BaseMCPServer("memory-engine", "4.6")
+server = BaseMCPServer("memory-engine", "4.7")
 
 # Регистрация инструментов (с исправленными сигнатурами)
 server.register_tool("mem_add", {
@@ -582,14 +582,14 @@ server.register_tool("mem_list_dialogs_summary", {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "offset": {"type": "integer", "default": 0, "description": "Starting offset"},
+            "offset": {"type": "integer", "default": 0, "description": "Starting offset (0 = first page)"},
             "limit": {"type": "integer", "default": 20, "description": "Number of dialogs per page (max 40)"},
             "search": {"type": "string", "description": "Optional search keyword (in context, op, or dialog name)"}
         }
     }
 }, lambda **kw: _engine.list_all_dialogs_with_summary(
     offset=kw.get("offset", 0),
-    limit=min(kw.get("limit", 20), 40),  # максимум 40 за раз
+    limit=min(kw.get("limit", 20), 40),
     search=kw.get("search")
 ))
 
@@ -673,7 +673,7 @@ server.register_tool("mem_archive_stats", {
     "inputSchema": {"type": "object", "properties": {}}
 }, lambda **kw: _engine.archive_stats())
 
-# Исправленный log_conversation (уже был)
+# Исправленный log_conversation
 server.register_tool("log_conversation", {
     "description": "Сохранить сообщение диалога (user/assistant) в память. Вызывай перед каждым своим ответом.",
     "inputSchema": {
