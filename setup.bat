@@ -1,0 +1,497 @@
+@echo off
+chcp 65001 >nul 2>&1
+cd /d "%~dp0"
+
+:: === DIAGNOSTICS ===
+echo ===============================================
+echo MCP Setup Script
+echo Current folder: %cd%
+echo Date: %date% %time%
+echo ===============================================
+echo.
+
+:: Check Python
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Python not found in PATH.
+    echo Install Python 3.10+ and add to PATH.
+    pause >nul
+    exit /b 1
+)
+echo [OK] Python found:
+python --version
+echo.
+
+setlocal enabledelayedexpansion
+
+:: ==================== PATHS ====================
+set "PYTHON_DEPS_DIR=%~dp0python_deps"
+set "VENV_DIR=%~dp0.venv"
+set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
+set "PID_FILE=%VENV_DIR%\server.pid"
+set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "LINK_NAME=MCP_Server.lnk"
+
+:: ==================== AUTO-SETUP ON FIRST RUN ====================
+if not exist "%VENV_DIR%" (
+    echo Virtual environment not found. Creating...
+    call :clean_venv_silent
+    if errorlevel 1 (
+        echo Error creating venv.
+        pause >nul
+        exit /b 1
+    )
+    if exist "%PYTHON_DEPS_DIR%\*.whl" (
+        echo Installing dependencies from python_deps...
+        call "%PYTHON_EXE%" mcp_setup.py --offline
+    ) else (
+        echo Downloading dependencies from internet...
+        call "%PYTHON_EXE%" mcp_setup.py --online
+        call "%PYTHON_EXE%" mcp_setup.py --offline
+    )
+)
+
+:: ==================== CHECK SERVER STATUS ====================
+set "SERVER_RUNNING=0"
+if exist "%PID_FILE%" (
+    set /p PID=<"%PID_FILE%"
+    tasklist /fi "PID eq !PID!" 2>nul | find /i "!PID!" >nul
+    if not errorlevel 1 set "SERVER_RUNNING=1"
+)
+
+:: ==================== MAIN MENU ====================
+:menu
+cls
+echo ================================================
+echo        MCP Filesystem Server – Management
+echo ================================================
+echo.
+if "%SERVER_RUNNING%"=="1" (
+    echo [SERVER] Running (PID: %PID%)
+) else (
+    echo [SERVER] Stopped
+)
+echo.
+echo --- Environment and Dependencies ---
+echo 1. Recreate virtual environment (clean)
+echo 2. Download dependencies (online)
+echo 3. Install dependencies (offline from python_deps)
+echo 4. Check and install missing dependencies (quick)
+echo.
+echo --- Configuration ---
+echo 5. Fix paths in mcpServers.json (manual)
+echo 6. Update LM Studio config (automatic)
+echo 7. Fix LM Studio config (fully automatic)
+echo.
+echo --- Server Control ---
+echo 8. Start / Stop server
+echo 9. Add to startup
+echo 10. Remove from startup
+echo 12. Install pandoc + wkhtmltopdf (for PDF export)
+echo 13. Install RAG dependencies (sentence-transformers + chromadb)
+echo 11. Exit
+echo.
+set /p action="Choose action (1-12): "
+if "%action%"=="11" goto exit
+if "%action%"=="13" goto install_rag_deps
+if "%action%"=="12" goto install_pdf_tools
+if "%action%"=="10" goto remove_autostart
+if "%action%"=="9" goto add_autostart
+if "%action%"=="8" goto toggle_server
+if "%action%"=="7" goto auto_fix_lmstudio
+if "%action%"=="6" goto fix_lmstudio
+if "%action%"=="5" goto fix_config_paths
+if "%action%"=="4" goto check_and_install
+if "%action%"=="3" goto offline_install
+if "%action%"=="2" goto online_download
+if "%action%"=="1" goto clean_venv
+goto menu
+
+:: ==================== 1. RECREATE VENV ====================
+:clean_venv
+echo.
+echo ================================================
+echo   Recreating virtual environment
+echo ================================================
+call :clean_venv_silent
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Failed to create or fix virtual environment.
+    echo Check that Python is correctly installed.
+    pause
+    goto menu
+)
+echo [OK] Virtual environment ready.
+pause
+goto menu
+
+:clean_venv_silent
+if exist "%VENV_DIR%" (
+    echo Removing old .venv folder...
+    rmdir /s /q "%VENV_DIR%"
+    if errorlevel 1 (
+        echo [ERROR] Could not remove old venv. Maybe files are locked?
+        exit /b 1
+    )
+)
+echo Creating new venv...
+python -m venv "%VENV_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Failed to create virtual environment.
+    exit /b 1
+)
+
+echo Ensuring pip is available...
+"%PYTHON_EXE%" -m ensurepip --upgrade >nul 2>&1
+if errorlevel 1 (
+    echo ensurepip failed, trying to download get-pip.py...
+    powershell -Command "Invoke-WebRequest -Uri https://bootstrap.pypa.io/get-pip.py -OutFile %TEMP%\get-pip.py" >nul 2>&1
+    if exist "%TEMP%\get-pip.py" (
+        "%PYTHON_EXE%" "%TEMP%\get-pip.py" >nul 2>&1
+        del "%TEMP%\get-pip.py" 2>nul
+    ) else (
+        echo [ERROR] Could not get get-pip.py. No internet?
+        exit /b 1
+    )
+)
+"%PYTHON_EXE%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Pip not available. Reinstall Python from python.org.
+    exit /b 1
+)
+echo [OK] Virtual environment ready with pip.
+exit /b 0
+
+:: ==================== 2. DOWNLOAD DEPENDENCIES ====================
+:online_download
+echo.
+echo ================================================
+echo   Downloading dependencies (internet required)
+echo ================================================
+if not exist "%PYTHON_EXE%" (
+    echo Virtual environment not found. Run step 1 first.
+    pause
+    goto menu
+)
+"%PYTHON_EXE%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo Pip not available. Recreate venv using option 1.
+    pause
+    goto menu
+)
+call "%PYTHON_EXE%" mcp_setup.py --online
+if errorlevel 1 (
+    echo Error during download.
+) else (
+    echo [OK] Dependencies downloaded to python_deps folder
+)
+pause
+goto menu
+
+:: ==================== 3. INSTALL DEPENDENCIES ====================
+:offline_install
+echo.
+echo ================================================
+echo   Installing dependencies from python_deps
+echo ================================================
+if not exist "%PYTHON_DEPS_DIR%\*.whl" (
+    echo Error: no .whl files in python_deps. Run step 2 first.
+    pause
+    goto menu
+)
+if not exist "%PYTHON_EXE%" (
+    echo Virtual environment not found. Run step 1 first.
+    pause
+    goto menu
+)
+"%PYTHON_EXE%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo Pip not available. Recreate venv using option 1.
+    pause
+    goto menu
+)
+call "%PYTHON_EXE%" mcp_setup.py --offline
+if errorlevel 1 (
+    echo Error during installation.
+) else (
+    echo [OK] Dependencies installed. Restart LM Studio.
+)
+pause
+goto menu
+
+:: ==================== 4. CHECK AND INSTALL MISSING ====================
+:check_and_install
+echo.
+echo ================================================
+echo   Checking and installing missing dependencies
+echo ================================================
+if not exist "%PYTHON_EXE%" (
+    echo Virtual environment not found. Run step 1 first.
+    pause
+    goto menu
+)
+"%PYTHON_EXE%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo Pip not available. Recreate venv using option 1.
+    pause
+    goto menu
+)
+call "%PYTHON_EXE%" mcp_setup.py --check
+if errorlevel 1 (
+    echo Error during check/install.
+) else (
+    echo [OK] All required dependencies are installed.
+)
+pause
+goto menu
+
+:: ==================== 5. FIX PATHS IN CUSTOM CONFIG ====================
+:fix_config_paths
+echo.
+echo ================================================
+echo   Fixing Python path in MCP config file
+echo ================================================
+echo.
+set /p CONFIG_PATH="Path to JSON file (Enter for C:\Tools\mcpServers.json): "
+if "%CONFIG_PATH%"=="" set "CONFIG_PATH=C:\Tools\mcpServers.json"
+call :fix_one_config "%CONFIG_PATH%"
+pause
+goto menu
+
+:: ==================== 6. UPDATE LM STUDIO CONFIG (LEGACY) ====================
+:fix_lmstudio
+echo.
+echo ================================================
+echo   Updating LM Studio configuration (legacy)
+echo ================================================
+set "LM_CONFIG=%USERPROFILE%\.lmstudio\mcp.json"
+if not exist "%LM_CONFIG%" (
+    echo Config not found: %LM_CONFIG%
+    echo Searching in other locations...
+    for /f "delims=" %%i in ('dir /s /b "%USERPROFILE%\.lmstudio\*.json" 2^>nul ^| findstr /i "mcp"') do set "LM_CONFIG=%%i"
+    if not defined LM_CONFIG (
+        echo Cannot find config. Use manual step 5.
+        pause
+        goto menu
+    )
+)
+echo Found config: %LM_CONFIG%
+call :fix_one_config "%LM_CONFIG%"
+echo Don't forget to restart LM Studio.
+pause
+goto menu
+
+:: ==================== 7. FIX LM STUDIO CONFIG (FULLY AUTOMATIC) ====================
+:auto_fix_lmstudio
+echo.
+echo ================================================
+echo   Fixing LM Studio configuration (automatic)
+echo ================================================
+
+if not exist "%PYTHON_EXE%" (
+    echo [ERROR] Virtual environment not found. Run step 1 first.
+    pause
+    goto menu
+)
+
+set "FIX_SCRIPT=%~dp0fix_lmstudio_config.py"
+if not exist "%FIX_SCRIPT%" (
+    echo [ERROR] fix_lmstudio_config.py not found.
+    echo Please create it in the MCP folder.
+    pause
+    goto menu
+)
+
+echo Running fix script...
+"%PYTHON_EXE%" "%FIX_SCRIPT%"
+if errorlevel 1 (
+    echo [ERROR] Failed to update config automatically.
+    echo You can manually edit %USERPROFILE%\.lmstudio\mcp.json
+) else (
+    echo [SUCCESS] LM Studio config updated.
+)
+
+echo.
+echo Please restart LM Studio if it was running.
+pause
+goto menu
+echo.
+echo ================================================
+echo   MANUAL ACTION REQUIRED
+echo ================================================
+echo Please edit the file:
+echo   %LM_CONFIG%
+echo.
+echo Find the line containing "command" and replace the path with:
+echo   "%ESC_PYTHON%"
+echo.
+echo Example:
+echo   "command": "%ESC_PYTHON%"
+echo.
+echo The file will be opened in Notepad. After saving, restart LM Studio.
+echo.
+pause
+start notepad "%LM_CONFIG%"
+echo.
+echo Press any key after you have saved the changes...
+pause >nul
+echo [OK] Configuration updated manually.
+goto menu
+
+:: ==================== COMMON FUNCTION TO FIX ONE CONFIG ====================
+:fix_one_config
+set "CONFIG_PATH=%~1"
+if not exist "%CONFIG_PATH%" (
+    echo [X] File not found: %CONFIG_PATH%
+    exit /b 1
+)
+
+if not exist "%PYTHON_EXE%" (
+    echo [X] Python not found in venv. Run step 1 first.
+    exit /b 1
+)
+
+:: Create backup
+set "BACKUP_PATH=%CONFIG_PATH%.backup_%RANDOM%"
+copy "%CONFIG_PATH%" "%BACKUP_PATH%" >nul 2>&1
+if errorlevel 1 (
+    echo [X] Cannot create backup (file may be locked)
+    exit /b 1
+)
+echo [OK] Backup: %BACKUP_PATH%
+
+set "ESC_PYTHON=%PYTHON_EXE:\=\\%"
+
+:: Replace path in JSON using PowerShell (simple one-liner)
+powershell -Command "$c = Get-Content -Path '%CONFIG_PATH%' -Raw -Encoding UTF8; $c = $c -replace '(?<=\"command\"\s*:\s*)\"(?:python|[^\"]*python\.exe)\"', '\"%ESC_PYTHON%\"'; Set-Content -Path '%CONFIG_PATH%' -Value $c -NoNewline -Encoding UTF8"
+if errorlevel 1 (
+    echo [X] Error during replacement in %CONFIG_PATH%
+    exit /b 1
+)
+echo [OK] Paths replaced.
+exit /b 0
+
+:: ==================== 8. START / STOP SERVER ====================
+:toggle_server
+if "%SERVER_RUNNING%"=="1" (
+    echo Stopping server...
+    taskkill /pid %PID% /f >nul 2>&1
+    del "%PID_FILE%" 2>nul
+    set "SERVER_RUNNING=0"
+    echo Server stopped.
+) else (
+    if not exist "%PYTHON_EXE%" (
+        echo Error: venv not found. Run steps 1 and 3.
+        pause
+        goto menu
+    )
+    echo Starting server in background...
+    powershell -Command "$p = Start-Process -FilePath '%PYTHON_EXE%' -ArgumentList '\"%cd%\mcp_fs_server.py\"' -WorkingDirectory '%cd%' -WindowStyle Hidden -PassThru; $p.Id | Out-File -FilePath '%PID_FILE%' -Encoding ASCII"
+    echo Server started (PID saved)
+)
+timeout /t 2 >nul
+goto menu
+
+:: ==================== 9. ADD TO AUTOSTART ====================
+:add_autostart
+set "HIDDEN_LAUNCHER=%~dp0start_hidden.ps1"
+(
+echo $p = Start-Process -FilePath '%PYTHON_EXE%' -ArgumentList '"%cd%\mcp_fs_server.py"' -WorkingDirectory '%cd%' -WindowStyle Hidden -PassThru
+echo $p.Id ^| Out-File -FilePath '%PID_FILE%' -Encoding ASCII
+) > "%HIDDEN_LAUNCHER%"
+powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%STARTUP_DIR%\%LINK_NAME%'); $s.TargetPath='powershell.exe'; $s.Arguments='-ExecutionPolicy Bypass -File \"%HIDDEN_LAUNCHER%\"'; $s.WorkingDirectory='%~dp0'; $s.Save()"
+echo [OK] Autostart added.
+pause
+goto menu
+
+:: ==================== 10. REMOVE FROM AUTOSTART ====================
+:remove_autostart
+if exist "%STARTUP_DIR%\%LINK_NAME%" (
+    del "%STARTUP_DIR%\%LINK_NAME%"
+    echo [OK] Autostart removed.
+) else echo Shortcut not found.
+pause
+goto menu
+
+:install_pdf_tools
+echo.
+echo ================================================
+echo   Installing pandoc + wkhtmltopdf
+echo ================================================
+echo.
+
+set "TOOLS_DIR=%~dp0mcp_tools"
+if not exist "%TOOLS_DIR%" mkdir "%TOOLS_DIR%"
+
+:: Установка pandoc (последняя стабильная версия 3.9.0.2)
+echo Downloading pandoc...
+powershell -Command "Invoke-WebRequest -Uri 'https://github.com/jgm/pandoc/releases/download/3.9.0.2/pandoc-3.9.0.2-windows-x86_64.msi' -OutFile '%TEMP%\pandoc.msi'"
+if exist "%TEMP%\pandoc.msi" (
+    echo Installing pandoc...
+    start /wait msiexec /i "%TEMP%\pandoc.msi" /quiet /norestart
+    del "%TEMP%\pandoc.msi" 2>nul
+    echo [OK] pandoc installed.
+) else (
+    echo [WARN] Failed to download pandoc.
+)
+
+:: Установка wkhtmltopdf (стабильная версия 0.12.6)
+echo.
+echo Downloading wkhtmltopdf...
+powershell -Command "Invoke-WebRequest -Uri 'https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox-0.12.6-1.msvc2015-win64.exe' -OutFile '%TEMP%\wkhtmltopdf.exe'"
+if exist "%TEMP%\wkhtmltopdf.exe" (
+    echo Installing wkhtmltopdf silently...
+    start /wait "%TEMP%\wkhtmltopdf.exe" /S /D="%TOOLS_DIR%\wkhtmltopdf"
+    del "%TEMP%\wkhtmltopdf.exe" 2>nul
+    echo [OK] wkhtmltopdf installed to %TOOLS_DIR%\wkhtmltopdf
+) else (
+    echo [WARN] Failed to download wkhtmltopdf. Check your internet connection.
+)
+
+echo.
+echo PDF tools installation finished.
+pause
+goto menu
+
+:install_rag_deps
+echo.
+echo ================================================
+echo   Installing RAG dependencies
+echo ================================================
+echo.
+if not exist "%PYTHON_EXE%" (
+    echo [ERROR] Virtual environment not found. Run step 1 first.
+    pause
+    goto menu
+)
+
+echo [1/3] Installing Python packages...
+"%PYTHON_EXE%" -m pip install sentence-transformers chromadb pypdf pdfplumber ebooklib
+
+if errorlevel 1 (
+    echo [ERROR] Failed to install Python packages.
+    pause
+    goto menu
+)
+
+echo [2/3] Downloading default embedding model (all-MiniLM-L6-v2)...
+"%PYTHON_EXE%" -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+if errorlevel 1 (
+    echo [WARN] Model download failed. It will be downloaded on first use.
+)
+
+echo [3/3] Creating RAG database directory...
+if not exist "%cd%\mcp_rag_db" mkdir "%cd%\mcp_rag_db"
+
+echo.
+echo [OK] RAG dependencies installed.
+echo You can now use tools: rag_index_folder, rag_search, rag_ask
+echo.
+pause
+goto menu
+
+:exit
+echo Press any key to exit...
+pause >nul
+exit /b 0
