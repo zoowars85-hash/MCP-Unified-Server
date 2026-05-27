@@ -39,6 +39,7 @@ META_DB_PATH = os.path.join(RAG_DB_PATH, "rag_meta.db")
 # Глобальные объекты
 _chroma_client = None
 _embedder = None
+_collection_lock = threading.Lock()
 _meta_conn = None
 _meta_lock = threading.Lock()
 
