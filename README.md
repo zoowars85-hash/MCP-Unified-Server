@@ -145,7 +145,7 @@ Community help for adapting to Linux/macOS and creating an installer is very wel
 
 📄 License
 The project is distributed under the MIT License.
-Author: Claus (claus@mcp.local)
+Author: Claus (zoowars85@gmail.com)
 Contact: Issues / Pull Requests on GitHub.
 
 
@@ -296,5 +296,5 @@ pip install -r requirements.txt   # или установите нужные п�
 
 📄 Лицензия
 Проект распространяется под MIT License.
-Автор: Claus (claus@mcp.local)
+Автор: Claus (zoowars85@gmail.com)
 Контакты: Issues / Pull Requests на GitHub.
