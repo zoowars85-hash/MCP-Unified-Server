@@ -55,6 +55,7 @@ SERVER_MODULES = [
     "mcp_smart_search",
     "dialog_manager",           # управление диалогами
     "mcp_rag_engine",           # <--- ДОБАВЛЕНО: RAG движок
+    "mcp_mempalace",
 ]
 
 PLUGIN_DIR = Path(__file__).parent / "mcp_plugins"
@@ -72,6 +73,7 @@ MODULE_DEPS = {
     "mcp_email_client": ["keyring"],
     "code_debugger_server": [],
     "knowledge_base_server": [],
+    "mcp_mempalace": [],
     "mcp_smart_search": [],
     "dialog_manager": [],
     "mcp_rag_engine": ["chromadb", "sentence_transformers", "pypdf", "docx", "ebooklib", "bs4"], # <--- ДОБАВЛЕНО
