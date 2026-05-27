@@ -100,29 +100,30 @@ echo --- Extra Tools ---
 echo  B. Install pandoc + wkhtmltopdf (for PDF export^)
 echo  C. Install RAG dependencies (sentence-transformers + chromadb^)
 echo  D. Install web-reader advanced deps
-echo  E. Install mempalace (external memory palace^)   <-- НОВЫЙ ПУНКТ
+echo  E. Install mempalace (external memory palace^)
 echo.
 echo  F. Exit
 echo.
 
 choice /C 123456789ABCDEF /N /M "Choose action: "
 set "CHOICE=%errorlevel%"
-if "%CHOICE%"=="16" goto exit
-if "%CHOICE%"=="15" goto install_mempalace
-if "%CHOICE%"=="14" goto install_web_deps
-if "%CHOICE%"=="13" goto install_rag_deps
-if "%CHOICE%"=="12" goto install_pdf_tools
-if "%CHOICE%"=="11" goto remove_autostart
-if "%CHOICE%"=="10" goto add_autostart
-if "%CHOICE%"=="9"  goto toggle_server
-if "%CHOICE%"=="8"  goto auto_fix_lmstudio
-if "%CHOICE%"=="7"  goto fix_lmstudio
-if "%CHOICE%"=="6"  goto fix_config_paths
-if "%CHOICE%"=="5"  goto check_and_install
-if "%CHOICE%"=="4"  goto offline_install
-if "%CHOICE%"=="3"  goto online_download
-if "%CHOICE%"=="2"  goto clean_venv
-if "%CHOICE%"=="1"  goto menu
+
+:: Правильное соответствие номерам в меню
+if "%CHOICE%"=="15" goto exit
+if "%CHOICE%"=="14" goto install_mempalace
+if "%CHOICE%"=="13" goto install_web_deps
+if "%CHOICE%"=="12" goto install_rag_deps
+if "%CHOICE%"=="11" goto install_pdf_tools
+if "%CHOICE%"=="10" goto remove_autostart
+if "%CHOICE%"=="9"  goto add_autostart
+if "%CHOICE%"=="8"  goto toggle_server
+if "%CHOICE%"=="7"  goto auto_fix_lmstudio
+if "%CHOICE%"=="6"  goto fix_lmstudio
+if "%CHOICE%"=="5"  goto fix_config_paths
+if "%CHOICE%"=="4"  goto check_and_install
+if "%CHOICE%"=="3"  goto offline_install
+if "%CHOICE%"=="2"  goto online_download
+if "%CHOICE%"=="1"  goto clean_venv
 goto menu
 
 :: ==================== 1. RECREATE VENV ====================
@@ -333,7 +334,6 @@ goto menu
 
 :: ==================== COMMON FUNCTION TO FIX ONE CONFIG ====================
 :fix_one_config
-:: Вызов Python-скрипта для безопасной замены путей в JSON
 set "TARGET_CFG=%~1"
 if not exist "%TARGET_CFG%" (
     echo [X] File not found: %TARGET_CFG%
