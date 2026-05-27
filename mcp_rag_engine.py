@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MCP RAG Engine v1.0 – семантический индекс книг и файлов
+MCP RAG Engine v1.2 – инкрементальная индексация, метаданные в SQLite,
+правильная статистика, список файлов.
 """
 import os
 import json
 import hashlib
+import sqlite3
+import time
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set, Tuple
 import threading
 
-# Векторная БД
 import chromadb
-from chromadb.config import Settings
-
-# Эмбеддеры
 from sentence_transformers import SentenceTransformer
-
-# Извлечение текста из разных форматов
 import pypdf
 import docx
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
-# Общие модули MCP
 from mcp_shared import (
     _log, BaseMCPServer, dialog_ctx, conversation_memory,
     normalize_path, _ensure_allowed, query_llm
@@ -37,16 +33,21 @@ CHUNK_OVERLAP = int(os.environ.get("MCP_RAG_CHUNK_OVERLAP", "100"))
 EMBEDDING_MODEL = os.environ.get("MCP_RAG_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 TOP_K = int(os.environ.get("MCP_RAG_TOP_K", "5"))
 
-# Глобальный экземпляр клиента Chroma (с поддержкой потоков)
+# Путь к БД метаданных (SQLite)
+META_DB_PATH = os.path.join(RAG_DB_PATH, "rag_meta.db")
+
+# Глобальные объекты
 _chroma_client = None
 _embedder = None
-_collections = {}  # name -> collection
-_collection_lock = threading.Lock()
+_meta_conn = None
+_meta_lock = threading.Lock()
 
 def _get_client() -> chromadb.ClientAPI:
     global _chroma_client
     if _chroma_client is None:
+        os.makedirs(RAG_DB_PATH, exist_ok=True)
         _chroma_client = chromadb.PersistentClient(path=RAG_DB_PATH)
+        _init_metadata_db()
     return _chroma_client
 
 def _get_embedder() -> SentenceTransformer:
@@ -57,7 +58,77 @@ def _get_embedder() -> SentenceTransformer:
         _log("[RAG] Embedder ready")
     return _embedder
 
-# ─── Извлечение текста из файлов ──────────────────────────────────────────
+def _init_metadata_db():
+    """Создаёт SQLite таблицу для отслеживания проиндексированных файлов."""
+    os.makedirs(RAG_DB_PATH, exist_ok=True)
+    with sqlite3.connect(META_DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rag_files (
+                source TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                collection_name TEXT NOT NULL,
+                indexed_at REAL NOT NULL,
+                last_modified REAL NOT NULL,
+                PRIMARY KEY (source, collection_name)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_collection ON rag_files(collection_name)")
+        conn.commit()
+
+def _get_indexed_metadata(collection_name: str) -> Dict[str, Tuple[str, float]]:
+    """Возвращает {source: (file_hash, last_modified)} для всех файлов в коллекции."""
+    with sqlite3.connect(META_DB_PATH) as conn:
+        cur = conn.execute(
+            "SELECT source, file_hash, last_modified FROM rag_files WHERE collection_name = ?",
+            (collection_name,)
+        )
+        return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+def _update_file_metadata(source: str, file_hash: str, collection_name: str, mtime: float):
+    """Обновляет или вставляет запись о файле в мета-БД."""
+    with sqlite3.connect(META_DB_PATH) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO rag_files (source, file_hash, collection_name, indexed_at, last_modified)
+               VALUES (?, ?, ?, ?, ?)""",
+            (source, file_hash, collection_name, time.time(), mtime)
+        )
+        conn.commit()
+
+def _delete_file_metadata(source: str, collection_name: str):
+    """Удаляет запись о файле из мета-БД."""
+    with sqlite3.connect(META_DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM rag_files WHERE source = ? AND collection_name = ?",
+            (source, collection_name)
+        )
+        conn.commit()
+
+def _remove_file_from_collection(collection, source: str):
+    """Удаляет все чанки файла из Chroma по метаданным source."""
+    try:
+        # Получаем все id чанков этого файла
+        result = collection.get(where={"source": source}, include=[])
+        ids = result["ids"]
+        if ids:
+            collection.delete(ids=ids)
+            _log(f"[RAG] Removed {len(ids)} chunks for {source}")
+    except Exception as e:
+        _log(f"[RAG] Failed to remove {source}: {e}")
+
+def _file_hash_and_mtime(file_path: Path) -> Tuple[str, float]:
+    """Вычисляет хеш содержимого файла (MD5) и возвращает mtime."""
+    try:
+        stat = file_path.stat()
+        mtime = stat.st_mtime
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        h = hashlib.md5(content).hexdigest()
+        return h, mtime
+    except Exception as e:
+        _log(f"[RAG] Error hashing {file_path}: {e}")
+        return "", 0.0
+
+# ─── Извлечение текста и чанкинг (без изменений) ──────────────────────────
 def extract_text(file_path: Path) -> str:
     """Извлекает текст из PDF, DOCX, EPUB, TXT, MD."""
     ext = file_path.suffix.lower()
@@ -86,25 +157,19 @@ def extract_text(file_path: Path) -> str:
         return ""
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Разбивает текст на перекрывающиеся фрагменты по предложениям/абзацам."""
     if not text:
         return []
-    
-    # Простая эвристика: разбиваем по абзацам
     paragraphs = text.split('\n')
     chunks = []
     current = []
     current_len = 0
-    
     for para in paragraphs:
         para = para.strip()
         if not para:
             continue
-        
         para_len = len(para)
         if current_len + para_len > chunk_size and current:
             chunks.append('\n'.join(current))
-            # keep overlap
             overlap_text = []
             overlap_len = 0
             for p in reversed(current):
@@ -115,131 +180,182 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
                     break
             current = overlap_text
             current_len = overlap_len
-            
         current.append(para)
         current_len += para_len
-        
     if current:
         chunks.append('\n'.join(current))
-        
     return chunks
 
-# ─── Индексация папки ──────────────────────────────────────────────────────
+# ─── Инкрементальная индексация ───────────────────────────────────────────
 def rag_index_folder(folder_path: str, collection_name: str = "default",
-                     force_reindex: bool = False) -> Dict:
-    """Рекурсивно индексирует все поддерживаемые файлы в папке."""
+                     force_reindex: bool = False, incremental: bool = True,
+                     cleanup_deleted: bool = False) -> Dict:
+    """
+    Индексирует папку.
+    - incremental=True: добавляет только новые/изменённые файлы.
+    - force_reindex=True: полностью пересоздаёт коллекцию (игнорирует incremental).
+    - cleanup_deleted=True: удаляет из индекса файлы, которых больше нет в папке.
+    """
     dialog_id = dialog_ctx.get()
     root = Path(normalize_path(folder_path))
     try:
         _ensure_allowed(root, "rag_index_folder")
     except PermissionError as e:
         return {"status": "error", "message": str(e)}
-        
     if not root.is_dir():
         return {"status": "error", "message": "Not a directory"}
-        
+
     client = _get_client()
     embedder = _get_embedder()
-    
+
+    # Работа с коллекцией
     with _collection_lock:
         try:
             collection = client.get_collection(collection_name)
             if force_reindex:
                 client.delete_collection(collection_name)
                 collection = client.create_collection(collection_name)
+                # Удаляем метаданные о файлах этой коллекции
+                with sqlite3.connect(META_DB_PATH) as conn:
+                    conn.execute("DELETE FROM rag_files WHERE collection_name = ?", (collection_name,))
+                    conn.commit()
         except Exception:
             collection = client.create_collection(collection_name)
-            
+
+    # Получаем уже проиндексированные файлы (source -> (hash, mtime))
+    indexed_files = _get_indexed_metadata(collection_name) if not force_reindex else {}
+
+    # Сканируем целевую папку
     supported_ext = {'.pdf', '.epub', '.docx', '.txt', '.md'}
-    files_to_index = []
+    current_files: List[Path] = []
     for f in root.rglob("*"):
         if f.is_file() and f.suffix.lower() in supported_ext:
-            files_to_index.append(f)
-            
-    total = len(files_to_index)
-    if total == 0:
-        return {"status": "error", "message": "No supported files found"}
-        
-    indexed_chunks = 0
+            current_files.append(f)
+
+    total = len(current_files)
+    new_count = 0
+    changed_count = 0
+    deleted_count = 0
     errors = 0
-    chunk_id_counter = 0
-    
-    for i, file_path in enumerate(files_to_index):
-        try:
-            raw_text = extract_text(file_path)
-            if not raw_text:
-                errors += 1
-                continue
-                
-            chunks = chunk_text(raw_text, CHUNK_SIZE, CHUNK_OVERLAP)
-            for chunk in chunks:
-                # Генерируем уникальный ID
-                chunk_id = hashlib.md5(
-                    f"{file_path}_{chunk_id_counter}".encode()
-                ).hexdigest()[:16]
-                embedding = embedder.encode(chunk).tolist()
-                metadata = {
-                    "source": str(file_path),
-                    "filename": file_path.name,
-                    "chunk_index": chunk_id_counter,
-                    "total_chunks": len(chunks)
-                }
-                collection.add(
-                    ids=[chunk_id],
-                    embeddings=[embedding],
-                    metadatas=[metadata],
-                    documents=[chunk]
-                )
-                chunk_id_counter += 1
-                indexed_chunks += 1
-        except Exception as e:
-            _log(f"[RAG] Error indexing {file_path}: {e}")
+    total_chunks_added = 0
+
+    # Сначала обрабатываем добавленные/изменённые файлы
+    for file_path in current_files:
+        src = str(file_path)
+        current_hash, current_mtime = _file_hash_and_mtime(file_path)
+        if not current_hash:
             errors += 1
-            
-        # Прогресс в диалог (если включён verbose)
-        if (i + 1) % 10 == 0:
-            _log(f"[RAG] Indexed {i+1}/{total} files, {indexed_chunks} chunks")
-            
+            continue
+
+        need_index = False
+        if src not in indexed_files:
+            need_index = True
+            new_count += 1
+        else:
+            stored_hash, stored_mtime = indexed_files[src]
+            # Если хеш не совпадает (файл изменился) – переиндексируем
+            if current_hash != stored_hash:
+                need_index = True
+                changed_count += 1
+
+        if need_index:
+            # Удаляем старые чанки, если файл уже был
+            if src in indexed_files:
+                _remove_file_from_collection(collection, src)
+                _delete_file_metadata(src, collection_name)
+
+            # Индексируем заново
+            try:
+                raw_text = extract_text(file_path)
+                if not raw_text:
+                    errors += 1
+                    continue
+
+                chunks = chunk_text(raw_text, CHUNK_SIZE, CHUNK_OVERLAP)
+                if not chunks:
+                    continue
+
+                # Добавляем чанки в коллекцию
+                chunk_ids = []
+                embeddings = []
+                metadatas = []
+                documents = []
+                for idx, chunk in enumerate(chunks):
+                    chunk_id = hashlib.md5(f"{src}_{idx}_{current_hash}".encode()).hexdigest()[:16]
+                    embedding = embedder.encode(chunk).tolist()
+                    metadata = {
+                        "source": src,
+                        "filename": file_path.name,
+                        "chunk_index": idx,
+                        "total_chunks": len(chunks),
+                        "file_hash": current_hash,
+                    }
+                    chunk_ids.append(chunk_id)
+                    embeddings.append(embedding)
+                    metadatas.append(metadata)
+                    documents.append(chunk)
+
+                collection.add(
+                    ids=chunk_ids,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                    documents=documents
+                )
+                total_chunks_added += len(chunks)
+                # Сохраняем метаинформацию
+                _update_file_metadata(src, current_hash, collection_name, current_mtime)
+            except Exception as e:
+                _log(f"[RAG] Error indexing {file_path}: {e}")
+                errors += 1
+
+    # Опционально удаляем файлы, которых больше нет в папке
+    if cleanup_deleted:
+        current_sources = {str(f) for f in current_files}
+        for src in indexed_files:
+            if src not in current_sources:
+                _remove_file_from_collection(collection, src)
+                _delete_file_metadata(src, collection_name)
+                deleted_count += 1
+
     conversation_memory.add(
         op="rag_index_folder",
         paths={"folder": str(root), "collection": collection_name},
         status="completed",
         dialog=dialog_id,
-        context=f"Indexed {indexed_chunks} chunks from {total - errors} files"
+        context=f"Indexed: {new_count} new, {changed_count} changed, {deleted_count} deleted, {errors} errors"
     )
-    
+
     return {
         "status": "success",
         "collection": collection_name,
         "files_scanned": total,
-        "files_processed": total - errors,
-        "chunks_created": indexed_chunks,
-        "errors": errors
+        "new_files": new_count,
+        "changed_files": changed_count,
+        "deleted_files": deleted_count,
+        "chunks_added": total_chunks_added,
+        "errors": errors,
+        "incremental": incremental,
+        "force_reindex": force_reindex,
+        "cleanup_deleted": cleanup_deleted
     }
 
-# ─── Поиск по RAG ──────────────────────────────────────────────────────────
+# ─── Поиск, статистика, список файлов (обновлённые) ────────────────────────
 def rag_search(query: str, collection_name: str = "default",
                top_k: int = TOP_K) -> Dict:
-    """Возвращает top_k наиболее релевантных фрагментов."""
     if not query.strip():
         return {"status": "error", "message": "Empty query"}
-        
     client = _get_client()
     embedder = _get_embedder()
-    
     try:
         collection = client.get_collection(collection_name)
     except Exception:
         return {"status": "error", "message": f"Collection '{collection_name}' not found"}
-        
     query_embedding = embedder.encode(query).tolist()
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
         include=["documents", "metadatas", "distances"]
     )
-    
-    # Формируем ответ
     chunks = []
     if results["ids"] and results["ids"][0]:
         for i, doc_id in enumerate(results["ids"][0]):
@@ -250,7 +366,6 @@ def rag_search(query: str, collection_name: str = "default",
                 "filename": results["metadatas"][0][i].get("filename", "unknown"),
                 "distance": results["distances"][0][i]
             })
-            
     return {
         "status": "success",
         "query": query,
@@ -259,14 +374,11 @@ def rag_search(query: str, collection_name: str = "default",
         "count": len(chunks)
     }
 
-# ─── Генерация ответа через LLM ────────────────────────────────────────────
 def rag_ask(question: str, collection_name: str = "default",
             top_k: int = TOP_K, model: Optional[str] = None) -> Dict:
-    """Ищет релевантные фрагменты и генерирует ответ через LLM."""
     search_result = rag_search(question, collection_name, top_k)
     if search_result.get("status") != "success":
         return search_result
-        
     chunks = search_result["chunks"]
     if not chunks:
         return {
@@ -274,15 +386,13 @@ def rag_ask(question: str, collection_name: str = "default",
             "question": question,
             "answer": "Не найдено релевантных фрагментов в индексе."
         }
-        
-    # Собираем контекст
     context_parts = []
     for i, ch in enumerate(chunks, 1):
         context_parts.append(f"[Фрагмент {i} из {ch['filename']}]\n{ch['text']}")
     context = "\n---\n".join(context_parts)
-    
     prompt = f"""Ты — помощник, отвечающий на вопросы, используя только предоставленный контекст.
-Если ответа нет в контексте, скажи: «В индексированных книгах нет информации об этом».
+Если ответа нет в контексте, скажи: «В индексированных документах нет информации об этом».
+При ответе указывай источник (имя файла).
 
 ВОПРОС: {question}
 
@@ -290,11 +400,9 @@ def rag_ask(question: str, collection_name: str = "default",
 {context}
 
 ОТВЕТ:"""
-    
     llm_response = query_llm(prompt, model=model)
     if not llm_response:
         llm_response = "Не удалось получить ответ от LLM. Проверьте LLM_ENDPOINT."
-        
     dialog_id = dialog_ctx.get()
     conversation_memory.add(
         op="rag_ask",
@@ -303,17 +411,54 @@ def rag_ask(question: str, collection_name: str = "default",
         dialog=dialog_id,
         context=f"Used {len(chunks)} chunks, answer length {len(llm_response)}"
     )
-    
     return {
         "status": "success",
         "question": question,
         "answer": llm_response,
         "used_chunks": len(chunks),
         "collection": collection_name,
-        "chunks": chunks  # можно убрать, если ответ и так длинный
+        "chunks": chunks
     }
 
-# ─── Статистика и управление коллекциями ────────────────────────────────────
+def rag_stats(collection_name: str = "default") -> Dict:
+    client = _get_client()
+    try:
+        coll = client.get_collection(collection_name)
+        total_chunks = coll.count()
+        # Количество уникальных файлов из мета-БД (быстро)
+        with sqlite3.connect(META_DB_PATH) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM rag_files WHERE collection_name = ?", (collection_name,))
+            unique_files = cur.fetchone()[0]
+        return {
+            "collection": collection_name,
+            "chunks": total_chunks,
+            "unique_files": unique_files,
+            "embedding_model": EMBEDDING_MODEL,
+            "chunk_size": CHUNK_SIZE,
+            "db_path": RAG_DB_PATH
+        }
+    except Exception as e:
+        return {"error": f"Collection '{collection_name}' not found or error: {e}"}
+
+def rag_list_files(collection_name: str = "default", limit: int = 100) -> Dict:
+    """Возвращает список файлов из мета-БД (быстро, без сканирования Chroma)."""
+    with sqlite3.connect(META_DB_PATH) as conn:
+        cur = conn.execute(
+            "SELECT source, file_hash, last_modified, indexed_at FROM rag_files WHERE collection_name = ?",
+            (collection_name,)
+        )
+        rows = cur.fetchall()
+        files = [{"source": r[0], "hash": r[1], "last_modified": r[2], "indexed_at": r[3]} for r in rows]
+        total = len(files)
+        if limit:
+            files = files[:limit]
+        return {
+            "status": "success",
+            "collection": collection_name,
+            "total_files": total,
+            "files": files
+        }
+
 def rag_list_collections() -> Dict:
     client = _get_client()
     collections = client.list_collections()
@@ -323,48 +468,37 @@ def rag_delete_collection(collection_name: str) -> Dict:
     client = _get_client()
     try:
         client.delete_collection(collection_name)
+        # Удаляем метаданные
+        with sqlite3.connect(META_DB_PATH) as conn:
+            conn.execute("DELETE FROM rag_files WHERE collection_name = ?", (collection_name,))
+            conn.commit()
         return {"status": "deleted", "collection": collection_name}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def rag_stats(collection_name: str = "default") -> Dict:
-    client = _get_client()
-    try:
-        coll = client.get_collection(collection_name)
-        count = coll.count()
-        # получить пример метаданных
-        sample = coll.get(limit=1, include=["metadatas"])
-        total_files = set()
-        if sample["metadatas"]:
-            total_files = {m["source"] for m in sample["metadatas"]}
-        return {
-            "collection": collection_name,
-            "chunks": count,
-            "unique_files": len(total_files),
-            "embedding_model": EMBEDDING_MODEL,
-            "chunk_size": CHUNK_SIZE,
-            "db_path": RAG_DB_PATH
-        }
-    except Exception:
-        return {"error": f"Collection '{collection_name}' not found"}
-
-# ─── Регистрация инструментов ───────────────────────────────────────────────
+# ─── Регистрация инструментов (обновлённая) ────────────────────────────────
 def register_tools(server: BaseMCPServer):
     server.register_tool("rag_index_folder", {
-        "description": "Индексировать папку с книгами/файлами в векторную БД (RAG)",
+        "description": "Индексировать папку с поддержкой инкрементального обновления",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder_path": {"type": "string"},
                 "collection_name": {"type": "string", "default": "default"},
-                "force_reindex": {"type": "boolean", "default": False}
+                "force_reindex": {"type": "boolean", "default": False},
+                "incremental": {"type": "boolean", "default": True},
+                "cleanup_deleted": {"type": "boolean", "default": False}
             },
             "required": ["folder_path"]
         }
-    }, lambda **kw: rag_index_folder(kw["folder_path"], kw.get("collection_name", "default"), kw.get("force_reindex", False)))
-    
+    }, lambda **kw: rag_index_folder(
+        kw["folder_path"], kw.get("collection_name", "default"),
+        kw.get("force_reindex", False), kw.get("incremental", True),
+        kw.get("cleanup_deleted", False)
+    ))
+
     server.register_tool("rag_search", {
-        "description": "Поиск релевантных фрагментов в индексе по ключевым словам/смыслу",
+        "description": "Поиск релевантных фрагментов",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -375,9 +509,9 @@ def register_tools(server: BaseMCPServer):
             "required": ["query"]
         }
     }, lambda **kw: rag_search(kw["query"], kw.get("collection_name", "default"), kw.get("top_k", TOP_K)))
-    
+
     server.register_tool("rag_ask", {
-        "description": "Задать вопрос, ответ будет сгенерирован LLM на основе найденных фрагментов",
+        "description": "Задать вопрос, ответ через LLM",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -388,10 +522,11 @@ def register_tools(server: BaseMCPServer):
             },
             "required": ["question"]
         }
-    }, lambda **kw: rag_ask(kw["question"], kw.get("collection_name", "default"), kw.get("top_k", TOP_K), kw.get("model")))
-    
+    }, lambda **kw: rag_ask(kw["question"], kw.get("collection_name", "default"),
+                            kw.get("top_k", TOP_K), kw.get("model")))
+
     server.register_tool("rag_stats", {
-        "description": "Статистика индекса (количество чанков, файлов, модель)",
+        "description": "Статистика индекса (чанки, уникальные файлы из мета-БД)",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -399,14 +534,25 @@ def register_tools(server: BaseMCPServer):
             }
         }
     }, lambda **kw: rag_stats(kw.get("collection_name", "default")))
-    
+
+    server.register_tool("rag_list_files", {
+        "description": "Список всех проиндексированных файлов в коллекции",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "collection_name": {"type": "string", "default": "default"},
+                "limit": {"type": "integer", "default": 100}
+            }
+        }
+    }, lambda **kw: rag_list_files(kw.get("collection_name", "default"), kw.get("limit", 100)))
+
     server.register_tool("rag_list_collections", {
-        "description": "Список всех коллекций в векторной БД",
+        "description": "Список коллекций",
         "inputSchema": {"type": "object", "properties": {}}
     }, lambda **kw: rag_list_collections())
-    
+
     server.register_tool("rag_delete_collection", {
-        "description": "Удалить коллекцию (освободить место)",
+        "description": "Удалить коллекцию",
         "inputSchema": {
             "type": "object",
             "properties": {"collection_name": {"type": "string"}},
@@ -414,17 +560,16 @@ def register_tools(server: BaseMCPServer):
         }
     }, lambda **kw: rag_delete_collection(kw["collection_name"]))
 
-# ─── Плагин MCP ─────────────────────────────────────────────────────────────
 __mcp_plugin__ = {
     "name": "rag-engine",
-    "version": "1.0",
-    "description": "Векторный поиск и RAG для книг и документов",
+    "version": "1.2",
+    "description": "Инкрементальная индексация, метаданные в SQLite, правильная статистика",
     "dependencies": ["sentence_transformers", "chromadb", "pypdf", "docx", "ebooklib", "bs4"],
-    "on_load": lambda: _log("[RAG] Engine loaded. Use rag_index_folder to index your books."),
+    "on_load": lambda: _log("[RAG] Engine v1.2 loaded. Incremental indexing enabled."),
     "on_unload": lambda: _log("[RAG] Engine unloaded.")
 }
 
 if __name__ == "__main__":
-    server = BaseMCPServer("rag-engine", "1.0")
+    server = BaseMCPServer("rag-engine", "1.2")
     register_tools(server)
     server.run()
