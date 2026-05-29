@@ -1,5 +1,7 @@
 # MCP Unified Server
 
+Works only directory C:\Tools !!! ist important
+
 **Мощный all-in-one MCP-сервер для локальных LLM**
 
 90+ инструментов для работы с файлами, RAG, планированием и автоматизацией задач.
